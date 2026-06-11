@@ -12,6 +12,8 @@
 
 import Foundation
 public import SWBCore
+import protocol SWBLLBuild.ProcessDelegate
+import typealias SWBLLBuild.llbuild_pid_t
 public import SWBUtil
 
 public final class LinkerTaskAction: TaskAction {
@@ -141,24 +143,36 @@ public final class LinkerTaskAction: TaskAction {
             archiveIndex += 1
             try executionDelegate.fs.createDirectory(extractDir)
 
-            let processDelegate = TaskProcessDelegate(outputDelegate: outputDelegate)
-            let success = try await dynamicExecutionDelegate.spawn(
-                commandLine: [arPath, "x", arg],
-                environment: task.environment.bindingsDictionary,
-                workingDirectory: extractDir,
-                processDelegate: processDelegate
+            let archiveMembers = try await staticArchiveMembers(
+                arPath: arPath,
+                archive: arg,
+                task: task,
+                dynamicExecutionDelegate: dynamicExecutionDelegate
             )
-
-            if let error = processDelegate.executionError {
-                throw StubError.error(error)
+            let containsDuplicateMemberNames = Set(archiveMembers).count != archiveMembers.count
+            let extractedObjects: [String]
+            if containsDuplicateMemberNames {
+                extractedObjects = try await extractStaticArchiveMembers(
+                    archiveMembers,
+                    arPath: arPath,
+                    archive: arg,
+                    extractDir: extractDir,
+                    task: task,
+                    dynamicExecutionDelegate: dynamicExecutionDelegate,
+                    executionDelegate: executionDelegate,
+                    outputDelegate: outputDelegate
+                )
+            } else {
+                try await extractStaticArchive(
+                    arPath: arPath,
+                    archive: arg,
+                    extractDir: extractDir,
+                    task: task,
+                    dynamicExecutionDelegate: dynamicExecutionDelegate,
+                    outputDelegate: outputDelegate
+                )
+                extractedObjects = archiveMembers.map { extractDir.join($0).str }
             }
-            guard success else {
-                throw StubError.error("Failed to extract static archive: \(arg)")
-            }
-
-            let extractedObjects = try executionDelegate.fs.listdir(extractDir)
-                .sorted()
-                .map { extractDir.join($0).str }
 
             // Update the command line to replace each static archive with the objects we extracted from it.
             let adjustedIndex = originalIndex + insertionOffset
@@ -168,6 +182,101 @@ public final class LinkerTaskAction: TaskAction {
         }
 
         return result
+    }
+
+    private func staticArchiveMembers(
+        arPath: String,
+        archive: String,
+        task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate
+    ) async throws -> [String] {
+        let processDelegate = CapturingProcessDelegate()
+        let success = try await dynamicExecutionDelegate.spawn(
+            commandLine: [arPath, "t", archive],
+            environment: task.environment.bindingsDictionary,
+            workingDirectory: task.workingDirectory,
+            processDelegate: processDelegate
+        )
+
+        if let error = processDelegate.executionError {
+            throw StubError.error(error)
+        }
+        guard success else {
+            throw StubError.error("Failed to list static archive: \(archive)")
+        }
+
+        return String(decoding: processDelegate.output, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+    }
+
+    private func extractStaticArchive(
+        arPath: String,
+        archive: String,
+        extractDir: Path,
+        task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async throws {
+        let processDelegate = TaskProcessDelegate(outputDelegate: outputDelegate)
+        let success = try await dynamicExecutionDelegate.spawn(
+            commandLine: [arPath, "x", archive],
+            environment: task.environment.bindingsDictionary,
+            workingDirectory: extractDir,
+            processDelegate: processDelegate
+        )
+
+        if let error = processDelegate.executionError {
+            throw StubError.error(error)
+        }
+        guard success else {
+            throw StubError.error("Failed to extract static archive: \(archive)")
+        }
+    }
+
+    private func extractStaticArchiveMembers(
+        _ archiveMembers: [String],
+        arPath: String,
+        archive: String,
+        extractDir: Path,
+        task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async throws -> [String] {
+        var instanceCounts: [String: Int] = [:]
+        var extractedObjects: [String] = []
+
+        for (memberIndex, member) in archiveMembers.enumerated() {
+            let instance = instanceCounts[member, default: 0] + 1
+            instanceCounts[member] = instance
+
+            let memberDir = extractDir.join(String(memberIndex))
+            try executionDelegate.fs.createDirectory(memberDir)
+
+            let processDelegate = TaskProcessDelegate(outputDelegate: outputDelegate)
+            let success = try await dynamicExecutionDelegate.spawn(
+                commandLine: [arPath, "xN", String(instance), archive, member],
+                environment: task.environment.bindingsDictionary,
+                workingDirectory: memberDir,
+                processDelegate: processDelegate
+            )
+
+            if let error = processDelegate.executionError {
+                throw StubError.error(error)
+            }
+            guard success else {
+                throw StubError.error("Failed to extract static archive member '\(member)' from '\(archive)'")
+            }
+
+            let memberOutputs = try executionDelegate.fs.listdir(memberDir).sorted()
+            guard memberOutputs.count == 1 else {
+                throw StubError.error("Expected one extracted object for archive member '\(member)' from '\(archive)', found \(memberOutputs.count)")
+            }
+            extractedObjects.append(memberDir.join(memberOutputs[0]).str)
+        }
+
+        return extractedObjects
     }
 
     private func runArchiver(
@@ -207,4 +316,25 @@ public final class LinkerTaskAction: TaskAction {
             return .failed
         }
     }
+}
+
+private final class CapturingProcessDelegate: ProcessDelegate {
+    private(set) var output: [UInt8] = []
+    private(set) var executionError: String?
+
+    func processStarted(pid: llbuild_pid_t?) {}
+
+    func processHadError(error: String) {
+        self.executionError = error
+    }
+
+    func processHadOutput(output: [UInt8]) {
+        self.output += output
+    }
+
+    func processHadOutput(output: String) {
+        self.output += Array(output.utf8)
+    }
+
+    func processFinished(result: CommandExtendedResult) {}
 }

@@ -381,6 +381,7 @@
     // SwiftPM test runner
     {   Type = ProductType;
         Identifier = com.apple.product-type.tool.swiftpm-test-runner;
+        Class = PBXToolProductType;
         BasedOn = com.apple.product-type.tool;
         Name = "SwiftPM Unit Test Runner";
         Description = "SwiftPM Unit Test Runner";

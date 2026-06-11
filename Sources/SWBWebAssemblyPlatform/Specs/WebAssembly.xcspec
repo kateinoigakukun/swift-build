@@ -32,6 +32,12 @@
     {
         Domain = webassembly;
         Type = ProductType;
+        Identifier = org.swift.product-type.library.static;
+        BasedOn = com.apple.product-type.library.static;
+    },
+    {
+        Domain = webassembly;
+        Type = ProductType;
         Identifier = com.apple.product-type.tool;
         BasedOn = default:com.apple.product-type.tool;
         DefaultBuildProperties = {

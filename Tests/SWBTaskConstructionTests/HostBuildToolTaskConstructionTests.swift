@@ -323,9 +323,28 @@ fileprivate struct HostBuildToolTaskConstructionTests: CoreBasedTests {
                 }
                 """)
             }
+            let customToolsetPath = sdkManifestDir.join("custom-toolset.json")
+            try await localFS.writeFileContents(customToolsetPath, waitForNewTimestamp: false) { stream in
+                stream.write("""
+                {
+                    "linker": {
+                        "extraCLIOptions": [
+                            "--target-toolset-ldflag"
+                        ]
+                    },
+                    "schemaVersion": "1.0"
+                }
+                """)
+            }
 
             let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "aarch64-swift-linux-musl", targetArchitecture: "aarch64", supportedArchitectures: ["aarch64"], disableOnlyActiveArch: false, core: core)
-            let parameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+            let parameters = BuildParameters(
+                configuration: "Debug",
+                activeRunDestination: destination,
+                overrides: [
+                    "SWIFT_SDK_TOOLSETS[__destination_platform=YES]": "$(inherited) \(customToolsetPath.str)"
+                ]
+            )
 
             await tester.checkBuild(parameters, runDestination: nil, targetName: "Framework", fs: localFS) { results in
                 results.checkNoDiagnostics()
@@ -340,6 +359,9 @@ fileprivate struct HostBuildToolTaskConstructionTests: CoreBasedTests {
                             compileTask.checkCommandLineDoesNotContain("-DDEST_NO")
                         }
                     }
+                    results.checkTask(.matchTarget(frameworkTarget), .matchRuleType("Ld")) { linkTask in
+                        linkTask.checkCommandLineContains(["-Xlinker", "--target-toolset-ldflag"])
+                    }
                 }
 
                 // Even when building for a Swift SDK Linux destination, the host tool should still build for macOS.
@@ -350,6 +372,9 @@ fileprivate struct HostBuildToolTaskConstructionTests: CoreBasedTests {
                         compileTask.checkCommandLineDoesNotContain("-DHOST_NO")
                         compileTask.checkCommandLineContains(["-DDEST_NO"])
                         compileTask.checkCommandLineDoesNotContain("-DDEST_YES")
+                    }
+                    results.checkTask(.matchTarget(hostTarget), .matchRuleType("Ld")) { linkTask in
+                        linkTask.checkCommandLineDoesNotContain("--target-toolset-ldflag")
                     }
                 }
 

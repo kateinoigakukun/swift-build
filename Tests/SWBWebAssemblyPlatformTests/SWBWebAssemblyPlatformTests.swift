@@ -126,4 +126,264 @@ fileprivate struct SWBWebAssemblyPlatformTests: CoreBasedTests {
             }
         }
     }
+
+    @Test(.requireSDKs(.host))
+    func swiftPMCommonStaticLibraryUsesArchiveForSwiftSDKWasm() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            let swiftCompilerPath = try await self.swiftCompilerPath
+            let swiftVersion = try await self.swiftVersion
+            let testProject = TestProject(
+                "aProject",
+                groupTree: TestGroup(
+                    "SomeFiles", path: "Sources",
+                    children: [
+                        TestFile("SwiftFile.swift"),
+                    ]),
+                targets: [
+                    TestStandardTarget(
+                        "MyLibrary",
+                        type: .commonStaticLibrary,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug",
+                                                   buildSettings: [
+                                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                                    "SDKROOT": "auto",
+                                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                                    "SWIFT_EXEC": swiftCompilerPath.str,
+                                                    "SWIFT_VERSION": swiftVersion,
+                                                   ]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase([
+                                TestBuildFile("SwiftFile.swift"),
+                            ]),
+                        ]),
+                ])
+            let core = try await Self.makeCore()
+            let tester = try TaskConstructionTester(core, testProject)
+
+            let sdkManifestContents = """
+            {
+                "schemaVersion" : "4.0",
+                "targetTriples" : {
+                    "wasm32-unknown-wasip1" : {
+                        "sdkRootPath" : "WASI.sdk",
+                        "swiftResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "swiftStaticResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "toolsetPaths" : [
+                            "toolset.json"
+                        ]
+                    }
+                }
+            }
+            """
+            let sdkManifestDir = tmpDir
+            try localFS.createDirectory(sdkManifestDir)
+            let sdkManifestPath = sdkManifestDir.join("swift-sdk.json")
+            try await localFS.writeFileContents(sdkManifestPath, waitForNewTimestamp: false, body: { $0.write(sdkManifestContents) })
+            try await localFS.writeFileContents(sdkManifestDir.join("toolset.json"), waitForNewTimestamp: false, body: { stream in
+                stream.write("""
+                {
+                    "rootPath" : "swift.xctoolchain/usr/bin",
+                    "schemaVersion" : "1.0"
+                }
+                """)
+            })
+
+            let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "wasm32-unknown-wasip1", targetArchitecture: "wasm32", supportedArchitectures: ["wasm32"], disableOnlyActiveArch: false, core: core)
+            let parameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+            await tester.checkBuild(parameters, runDestination: nil, fs: localFS) { results in
+                results.checkTask(.matchTargetName("MyLibrary"), .matchRuleType("Libtool"), .matchRuleItemBasename("libMyLibrary.a")) { _ in }
+                results.checkNoTask(.matchTargetName("MyLibrary"), .matchRuleType("Ld"))
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    func swiftSDKRunDestinationDoesNotRewriteAutomaticSDKRootToPlatformSDK() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            let swiftCompilerPath = try await self.swiftCompilerPath
+            let swiftVersion = try await self.swiftVersion
+            let testProject = TestProject(
+                "aProject",
+                groupTree: TestGroup(
+                    "SomeFiles", path: "Sources",
+                    children: [
+                        TestFile("SwiftFile.swift"),
+                    ]),
+                targets: [
+                    TestAggregateTarget(
+                        "MyPackageTests",
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug",
+                                                   buildSettings: [
+                                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                                   ]),
+                        ],
+                        dependencies: [
+                            "MyLibrary",
+                        ]),
+                    TestStandardTarget(
+                        "MyLibrary",
+                        type: .dynamicLibrary,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug",
+                                                   buildSettings: [
+                                                    "GENERATE_INFOPLIST_FILE": "YES",
+                                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                                    "SDKROOT": "auto",
+                                                    "SWIFT_EXEC": swiftCompilerPath.str,
+                                                    "SWIFT_VERSION": swiftVersion,
+                                                   ]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase([
+                                TestBuildFile("SwiftFile.swift"),
+                            ]),
+                        ]),
+                ])
+            let core = try await Self.makeCore()
+            let tester = try TaskConstructionTester(core, testProject)
+
+            let sdkManifestContents = """
+            {
+                "schemaVersion" : "4.0",
+                "targetTriples" : {
+                    "wasm32-unknown-wasip1" : {
+                        "sdkRootPath" : "WASI.sdk",
+                        "swiftResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "swiftStaticResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "toolsetPaths" : [
+                            "toolset.json"
+                        ]
+                    }
+                }
+            }
+            """
+            let sdkManifestDir = tmpDir
+            try localFS.createDirectory(sdkManifestDir)
+            let sdkManifestPath = sdkManifestDir.join("swift-sdk.json")
+            try await localFS.writeFileContents(sdkManifestPath, waitForNewTimestamp: false, body: { $0.write(sdkManifestContents) })
+            try await localFS.writeFileContents(sdkManifestDir.join("toolset.json"), waitForNewTimestamp: false, body: { stream in
+                stream.write("""
+                {
+                    "rootPath" : "swift.xctoolchain/usr/bin",
+                    "schemaVersion" : "1.0"
+                }
+                """)
+            })
+
+            let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "wasm32-unknown-wasip1", targetArchitecture: "wasm32", supportedArchitectures: ["wasm32"], disableOnlyActiveArch: false, core: core)
+            let parameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+
+            let workspaceContext = WorkspaceContext(core: core, workspace: tester.workspace, fs: localFS, processExecutionCache: .sharedForTesting)
+            let project = tester.workspace.projects[0]
+            let aggregateTarget = try #require(project.targets.first { $0.name == "MyPackageTests" })
+            let buildRequest = BuildRequest(
+                parameters: parameters,
+                buildTargets: [
+                    BuildRequest.BuildTargetInfo(parameters: parameters, target: aggregateTarget),
+                ],
+                dependencyScope: .workspace,
+                continueBuildingAfterErrors: true,
+                useParallelTargets: true,
+                useImplicitDependencies: false,
+                useDryRun: false
+            )
+            try core.performInitialization(for: buildRequest)
+            let buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+            let settings = Settings(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext, parameters: parameters, project: project, target: aggregateTarget)
+            #expect(settings.errors.isEmpty)
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    func swiftPMTestRunnerReportsExecutableArtifactForSwiftSDKWasm() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            let swiftCompilerPath = try await self.swiftCompilerPath
+            let swiftVersion = try await self.swiftVersion
+            let testProject = TestProject(
+                "aProject",
+                groupTree: TestGroup(
+                    "SomeFiles", path: "Sources",
+                    children: [
+                        TestFile("SwiftFile.swift"),
+                    ]),
+                targets: [
+                    TestStandardTarget(
+                        "MyPackageTests-product",
+                        type: .swiftpmTestRunner,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug",
+                                                   buildSettings: [
+                                                    "PRODUCT_NAME": "MyPackageTests",
+                                                    "SDKROOT": "auto",
+                                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                                    "SWIFT_EXEC": swiftCompilerPath.str,
+                                                    "SWIFT_VERSION": swiftVersion,
+                                                   ]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(),
+                        ]),
+                ])
+            let core = try await Self.makeCore()
+            let tester = try TaskConstructionTester(core, testProject)
+
+            let sdkManifestContents = """
+            {
+                "schemaVersion" : "4.0",
+                "targetTriples" : {
+                    "wasm32-unknown-wasip1" : {
+                        "sdkRootPath" : "WASI.sdk",
+                        "swiftResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "swiftStaticResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "toolsetPaths" : [
+                            "toolset.json"
+                        ]
+                    }
+                }
+            }
+            """
+            let sdkManifestDir = tmpDir
+            try localFS.createDirectory(sdkManifestDir)
+            let sdkManifestPath = sdkManifestDir.join("swift-sdk.json")
+            try await localFS.writeFileContents(sdkManifestPath, waitForNewTimestamp: false, body: { $0.write(sdkManifestContents) })
+            try await localFS.writeFileContents(sdkManifestDir.join("toolset.json"), waitForNewTimestamp: false, body: { stream in
+                stream.write("""
+                {
+                    "rootPath" : "swift.xctoolchain/usr/bin",
+                    "schemaVersion" : "1.0"
+                }
+                """)
+            })
+
+            let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "wasm32-unknown-wasip1", targetArchitecture: "wasm32", supportedArchitectures: ["wasm32"], disableOnlyActiveArch: false, core: core)
+            let parameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+
+            let workspaceContext = WorkspaceContext(core: core, workspace: tester.workspace, fs: localFS, processExecutionCache: .sharedForTesting)
+            let project = tester.workspace.projects[0]
+            let testRunnerTarget = try #require(project.targets.first { $0.name == "MyPackageTests-product" })
+            let buildRequest = BuildRequest(
+                parameters: parameters,
+                buildTargets: [
+                    BuildRequest.BuildTargetInfo(parameters: parameters, target: testRunnerTarget),
+                ],
+                dependencyScope: .workspace,
+                continueBuildingAfterErrors: true,
+                useParallelTargets: true,
+                useImplicitDependencies: false,
+                useDryRun: false
+            )
+            try core.performInitialization(for: buildRequest)
+            let buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+            let settings = Settings(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext, parameters: parameters, project: project, target: testRunnerTarget)
+            #expect(settings.errors.isEmpty)
+
+            let artifactInfo = try #require(settings.productType?.artifactInfo(in: settings.globalScope))
+            #expect(artifactInfo.kind == .executable)
+            #expect(artifactInfo.path.str.hasSuffix("/MyPackageTests.wasm"))
+        }
+    }
 }

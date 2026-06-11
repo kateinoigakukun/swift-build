@@ -3682,6 +3682,15 @@ private class SettingsBuilder: ProjectMatchLookup {
             return
         }
 
+        // Swift SDK destinations synthesize an SDK keyed by the Swift SDK manifest path. Do not rewrite SDKROOT to a
+        // platform SDK name such as "webassembly", which may not be registered as a standalone SDK.
+        switch runDestination.buildTarget {
+        case .swiftSDK, .inMemorySwiftSDK:
+            return
+        case .toolchainSDK:
+            break
+        }
+
         let destinationSDK: SDK
         do {
             if let sdk = try sdkRegistry.lookup(nameOrPath: runDestination.sdk, basePath: project?.sourceRoot ?? Path.root, activeRunDestination: runDestination) {
@@ -3699,16 +3708,8 @@ private class SettingsBuilder: ProjectMatchLookup {
         }
 
         let destinationPlatformIsMacOS = destinationPlatform.name == "macosx"
-        let destinationPlatformIsLinux = destinationPlatform.name == "linux"
         let destinationPlatformIsDevice = destinationPlatform.correspondingSimulatorPlatformName != nil && !destinationPlatformIsMacOS
         let destinationPlatformIsDeviceOrSimulator = destinationPlatformIsDevice || destinationPlatform.isSimulator
-        let destinationUsesSwiftSDK: Bool
-        switch runDestination.buildTarget {
-        case .swiftSDK, .inMemorySwiftSDK:
-            destinationUsesSwiftSDK = true
-        case .toolchainSDK:
-            destinationUsesSwiftSDK = false
-        }
 
         // Target info
         guard self.target != nil else { return }
@@ -3813,8 +3814,6 @@ private class SettingsBuilder: ProjectMatchLookup {
 
         // Destination info: since runDestination.{platform,sdk} were set by the IDE, we expect them to resolve in Swift Build correctly
         guard let runDestination = self.parameters.activeRunDestination else { return }
-
-        let destinationPlatform: Platform
 
         let platformName = runDestination.platform
         guard let destinationPlatform: Platform = self.core.platformRegistry.lookup(name: platformName) else {
