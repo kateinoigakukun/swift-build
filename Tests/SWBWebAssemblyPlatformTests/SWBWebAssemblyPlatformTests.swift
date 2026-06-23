@@ -12,6 +12,7 @@
 
 import Testing
 import SWBCore
+import SWBMacro
 import SWBProtocol
 import SWBTestSupport
 import SWBTaskExecution
@@ -123,6 +124,199 @@ fileprivate struct SWBWebAssemblyPlatformTests: CoreBasedTests {
 
                 // Check there are no diagnostics.
                 results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    func swiftSDKRunDestinationRemapUsesManifestSDKRoot() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            let core = try await Self.makeCore()
+
+            let sdkManifestContents = """
+            {
+                "schemaVersion" : "4.0",
+                "targetTriples" : {
+                    "wasm32-unknown-wasip1" : {
+                        "sdkRootPath" : "WASI.sdk",
+                        "swiftResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "swiftStaticResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "toolsetPaths" : [
+                            "toolset.json"
+                        ]
+                    }
+                }
+            }
+            """
+            let sdkManifestPath = tmpDir.join("swift-sdk.json")
+            try localFS.createDirectory(tmpDir)
+            try await localFS.writeFileContents(sdkManifestPath, waitForNewTimestamp: false) {
+                $0.write(sdkManifestContents)
+            }
+            try await localFS.writeFileContents(tmpDir.join("toolset.json"), waitForNewTimestamp: false) { stream in
+                stream.write("""
+                {
+                    "rootPath" : "swift.xctoolchain/usr/bin",
+                    "schemaVersion" : "1.0"
+                }
+                """)
+            }
+
+            let workspace = try TestWorkspace("Workspace", projects: [
+                TestProject(
+                    "aProject",
+                    sourceRoot: tmpDir.join("Project"),
+                    groupTree: TestGroup("SomeFiles", children: [
+                        TestFile("SourceFile.swift"),
+                    ]),
+                    targets: [
+                        TestStandardTarget(
+                            "MyLibrary",
+                            type: .staticLibrary,
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug", buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SDKROOT": "linux",
+                                    "SDK_VARIANT": "auto",
+                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                ]),
+                            ],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["SourceFile.swift"]),
+                            ]
+                        ),
+                    ]
+                )
+            ]).load(core)
+
+            let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "wasm32-unknown-wasip1", targetArchitecture: "wasm32", supportedArchitectures: ["wasm32"], disableOnlyActiveArch: false, core: core)
+            let parameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+            let project = try #require(workspace.projects.only)
+            let target = try #require(project.targets.only)
+            let buildRequest = BuildRequest(
+                parameters: parameters,
+                buildTargets: [
+                    BuildRequest.BuildTargetInfo(parameters: parameters, target: target),
+                ],
+                continueBuildingAfterErrors: true,
+                useParallelTargets: true,
+                useImplicitDependencies: false,
+                useDryRun: false
+            )
+            try core.performInitialization(for: buildRequest)
+
+            let workspaceContext = WorkspaceContext(core: core, workspace: workspace, fs: localFS, processExecutionCache: .sharedForTesting)
+            let buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+            let settings = Settings(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext, parameters: parameters, project: project, target: target)
+
+            #expect(settings.errors == [])
+            #expect(settings.sdk?.canonicalName == sdkManifestPath.str)
+            #expect(settings.globalScope.evaluate(BuiltinMacros.SDKROOT) == tmpDir.join("WASI.sdk"))
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    func packageProductSwiftSDKRunDestinationUsesManifestSDKRoot() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            let core = try await Self.makeCore()
+
+            let sdkManifestContents = """
+            {
+                "schemaVersion" : "4.0",
+                "targetTriples" : {
+                    "wasm32-unknown-wasip1" : {
+                        "sdkRootPath" : "WASI.sdk",
+                        "swiftResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "swiftStaticResourcesPath" : "swift.xctoolchain/usr/lib/swift_static",
+                        "toolsetPaths" : [
+                            "toolset.json"
+                        ]
+                    }
+                }
+            }
+            """
+            let sdkManifestPath = tmpDir.join("swift-sdk.json")
+            try localFS.createDirectory(tmpDir)
+            try await localFS.writeFileContents(sdkManifestPath, waitForNewTimestamp: false) {
+                $0.write(sdkManifestContents)
+            }
+            try await localFS.writeFileContents(tmpDir.join("toolset.json"), waitForNewTimestamp: false) { stream in
+                stream.write("""
+                {
+                    "rootPath" : "swift.xctoolchain/usr/bin",
+                    "schemaVersion" : "1.0"
+                }
+                """)
+            }
+
+            let packageTestsName = "SDKRootAutoReproPackageTests"
+            let workspace = try TestWorkspace("Workspace", projects: [
+                TestPackageProject(
+                    "SDKRootAutoRepro",
+                    sourceRoot: tmpDir.join("Package"),
+                    groupTree: TestGroup("Package", children: [
+                        TestFile("SDKRootAutoReproTests.swift"),
+                    ]),
+                    targets: [
+                        TestPackageProductTarget(
+                            packageTestsName,
+                            frameworksBuildPhase: TestFrameworksBuildPhase([
+                                TestBuildFile(.target("SDKRootAutoReproTests")),
+                            ]),
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug", buildSettings: [
+                                    "SDKROOT": "auto",
+                                    "SDK_VARIANT": "auto",
+                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                ]),
+                            ],
+                            dependencies: ["SDKRootAutoReproTests"]
+                        ),
+                        TestStandardTarget(
+                            "SDKRootAutoReproTests",
+                            type: .objectFile,
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug", buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SDKROOT": "auto",
+                                    "SDK_VARIANT": "auto",
+                                    "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                ]),
+                            ],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["SDKRootAutoReproTests.swift"]),
+                            ]
+                        ),
+                    ]
+                )
+            ]).load(core)
+
+            let destination = try RunDestinationInfo(sdkManifestPath: sdkManifestPath, triple: "wasm32-unknown-wasip1", targetArchitecture: "wasm32", supportedArchitectures: ["wasm32"], disableOnlyActiveArch: false, core: core)
+            let requestParameters = BuildParameters(configuration: "Debug", activeRunDestination: destination)
+            let targetParameters = BuildParameters(configuration: "Debug")
+            let buildRequest = BuildRequest(
+                parameters: requestParameters,
+                buildTargets: [
+                    BuildRequest.BuildTargetInfo(parameters: targetParameters, target: try #require(workspace.targets(named: packageTestsName).only)),
+                ],
+                continueBuildingAfterErrors: true,
+                useParallelTargets: true,
+                useImplicitDependencies: false,
+                useDryRun: false
+            )
+            try core.performInitialization(for: buildRequest)
+
+            let workspaceContext = WorkspaceContext(core: core, workspace: workspace, fs: localFS, processExecutionCache: .sharedForTesting)
+            let buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+            let buildGraph = await TargetBuildGraph(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+            for targetName in [packageTestsName, "SDKRootAutoReproTests"] {
+                let configuredTarget = try #require(buildGraph.allTargets.first { $0.target.name == targetName })
+                #expect(configuredTarget.parameters.overrides["SDKROOT"] == sdkManifestPath.str, "\(targetName) should preserve the Swift SDK manifest path")
+                #expect(configuredTarget.parameters.overrides["SDKROOT"] != "webassembly")
+
+                let settings = buildRequestContext.getCachedSettings(configuredTarget.parameters, target: configuredTarget.target)
+                #expect(settings.errors == [])
+                #expect(settings.globalScope.evaluate(BuiltinMacros.SDKROOT) == tmpDir.join("WASI.sdk"))
             }
         }
     }

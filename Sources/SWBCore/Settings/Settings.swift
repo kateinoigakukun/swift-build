@@ -1780,22 +1780,30 @@ private class SettingsBuilder: ProjectMatchLookup {
             // Perform the initial SDK resolution (this may drive the platform).
             sdkroot = createScope(effectiveTargetConfig, sdkToUse: sdk).evaluate(BuiltinMacros.SDKROOT).str
 
-            // We will replace SDKROOT values of "auto" here if the run destination is compatible.
+            // We will replace SDKROOT values of "auto" here if the toolchain SDK run destination is compatible.
+            // Swift SDK destinations use their manifest path as the SDK lookup key, then the synthesized SDK
+            // contributes its manifest-defined SDKROOT.
             let usesReplaceableAutomaticSDKRoot: Bool
             if sdkroot == "auto",
                let runDestination = parameters.activeRunDestination {
-                let activePlatform = runDestination.platform
-                let destinationIsMacCatalyst = runDestination.isMacCatalyst
+                switch runDestination.buildTarget {
+                case .swiftSDK, .inMemorySwiftSDK:
+                    sdkroot = runDestination.sdk
+                    usesReplaceableAutomaticSDKRoot = false
+                case .toolchainSDK:
+                    let activePlatform = runDestination.platform
+                    let destinationIsMacCatalyst = runDestination.isMacCatalyst
 
-                let scope = createScope(effectiveTargetConfig, sdkToUse: sdk)
-                let supportedPlatforms = scope.evaluate(BuiltinMacros.SUPPORTED_PLATFORMS)
-                let runDestinationIsSupported = supportedPlatforms.contains(activePlatform)
-                let supportsMacCatalyst = Settings.supportsMacCatalyst(scope: scope, core: core)
-                if destinationIsMacCatalyst && supportsMacCatalyst {
-                    usesReplaceableAutomaticSDKRoot = true
-                }
-                else {
-                    usesReplaceableAutomaticSDKRoot = runDestinationIsSupported
+                    let scope = createScope(effectiveTargetConfig, sdkToUse: sdk)
+                    let supportedPlatforms = scope.evaluate(BuiltinMacros.SUPPORTED_PLATFORMS)
+                    let runDestinationIsSupported = supportedPlatforms.contains(activePlatform)
+                    let supportsMacCatalyst = Settings.supportsMacCatalyst(scope: scope, core: core)
+                    if destinationIsMacCatalyst && supportsMacCatalyst {
+                        usesReplaceableAutomaticSDKRoot = true
+                    }
+                    else {
+                        usesReplaceableAutomaticSDKRoot = runDestinationIsSupported
+                    }
                 }
             } else {
                 usesReplaceableAutomaticSDKRoot = false
@@ -3712,7 +3720,6 @@ private class SettingsBuilder: ProjectMatchLookup {
         }
 
         let destinationPlatformIsMacOS = destinationPlatform.name == "macosx"
-        let destinationPlatformIsLinux = destinationPlatform.name == "linux"
         let destinationPlatformIsDevice = destinationPlatform.correspondingSimulatorPlatformName != nil && !destinationPlatformIsMacOS
         let destinationPlatformIsDeviceOrSimulator = destinationPlatformIsDevice || destinationPlatform.isSimulator
         let destinationUsesSwiftSDK: Bool
@@ -3753,6 +3760,10 @@ private class SettingsBuilder: ProjectMatchLookup {
         let targetSupportsDestinationPlatform = targetSupportedPlatforms.contains { $0 === destinationPlatform }
 
         func getLatestSDKCanonicalName(for platform: Platform) -> String? {
+            if destinationUsesSwiftSDK && platform === destinationPlatform {
+                return destinationSDK.canonicalName
+            }
+
             guard let canonicalBaseName = platform.sdkCanonicalName else {
                 return nil
             }
