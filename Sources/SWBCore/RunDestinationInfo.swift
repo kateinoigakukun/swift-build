@@ -76,6 +76,15 @@ public struct RunDestinationInfo: SerializableCodable, Hashable, Sendable {
 }
 
 extension RunDestinationInfo {
+    package var usesSwiftSDK: Bool {
+        switch buildTarget {
+        case .swiftSDK, .inMemorySwiftSDK:
+            return true
+        case .toolchainSDK:
+            return false
+        }
+    }
+
     /// The SDK canonical name for toolchain SDKs; the SDK manifest path for Swift SDKs.
     package var sdk: String {
         switch buildTarget {
